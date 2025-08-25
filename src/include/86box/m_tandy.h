@@ -36,6 +36,15 @@ typedef struct t1kvid_t {
     uint8_t  planar_ctrl;
     uint8_t  lp_strobe;
 
+    uint8_t  baseline_crtc_r2;
+    uint8_t  baseline_crtc_r7;
+    uint8_t  last_crtc_r1;
+    uint8_t  last_crtc_r6;
+    int      calib_countdown;
+    int      baseline_ready;
+    int      hsync_offset;
+    int      vsync_offset;
+
     int      linepos;
     int      displine;
     int      scanline;
