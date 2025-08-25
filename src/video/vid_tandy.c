@@ -161,14 +161,14 @@ vid_update_latch(t1kvid_t *vid)
 static void
 vid_update_display_offset(t1kvid_t *vid)
 {
-    const int calibration_frames = 6;
+    const int calib_frames = 6;
     const int hsync_scale = 16;
     const int vsync_scale = 4;
 
-    if (vid->crtc[1] != vid->last_crtc_r1 || vid->crtc[6] != vid->last_crtc_r6) {
-        vid->last_crtc_r1 = vid->crtc[1];
-        vid->last_crtc_r6 = vid->crtc[6];
-        vid->calib_countdown = calibration_frames;
+    if (vid->crtc[1] != vid->last_hdisp || vid->crtc[6] != vid->last_vdisp) {
+        vid->last_hdisp = vid->crtc[1];
+        vid->last_vdisp = vid->crtc[6];
+        vid->calib_countdown = calib_frames;
         vid->baseline_ready = 0;
         vid->hsync_offset = 0;
         vid->vsync_offset = 0;
@@ -177,8 +177,8 @@ vid_update_display_offset(t1kvid_t *vid)
 
     if (vid->calib_countdown > 0) {
         vid->calib_countdown--;
-        vid->baseline_crtc_r2 = vid->crtc[2];
-        vid->baseline_crtc_r7 = vid->crtc[7];
+        vid->baseline_hsyncpos = vid->crtc[2];
+        vid->baseline_vsyncpos = vid->crtc[7];
         vid->hsync_offset = 0;
         vid->vsync_offset = 0;
         if (vid->calib_countdown == 0)
@@ -192,8 +192,8 @@ vid_update_display_offset(t1kvid_t *vid)
         return;
     }
 
-    int hsync_deviation = (int)vid->baseline_crtc_r2 - (int)vid->crtc[2];
-    int vsync_deviation = (int)vid->baseline_crtc_r7 - (int)vid->crtc[7];
+    int hsync_deviation = (int)vid->baseline_hsyncpos - (int)vid->crtc[2];
+    int vsync_deviation = (int)vid->baseline_vsyncpos - (int)vid->crtc[7];
 
     vid->hsync_offset = hsync_deviation * hsync_scale;
     vid->vsync_offset = vsync_deviation * vsync_scale;
@@ -779,14 +779,14 @@ tandy_vid_init(tandy_t *dev)
     t1kvid_t *vid;
 
     vid = calloc(1, sizeof(t1kvid_t));
-    vid->hsync_offset = 0;
-    vid->vsync_offset = 0;
-    vid->baseline_crtc_r2 = 0;
-    vid->baseline_crtc_r7 = 0;
-    vid->last_crtc_r1 = 0xFF;
-    vid->last_crtc_r6 = 0xFF;
+    vid->baseline_hsyncpos = 0;
+    vid->baseline_vsyncpos = 0;
+    vid->last_hdisp = 0xFF;
+    vid->last_vdisp = 0xFF;
     vid->calib_countdown = 0;
     vid->baseline_ready = 0;
+    vid->hsync_offset = 0;
+    vid->vsync_offset = 0;
     vid->memctrl = -1;
 
     video_inform(VIDEO_FLAG_TYPE_CGA, &timing_dram);
