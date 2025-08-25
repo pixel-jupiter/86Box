@@ -161,7 +161,7 @@ vid_update_latch(t1kvid_t *vid)
 static void
 vid_update_display_offset(t1kvid_t *vid)
 {
-    const int calibration_frames = 30;
+    const int calibration_frames = 6;
     const int hsync_scale = 16;
     const int vsync_scale = 4;
 
