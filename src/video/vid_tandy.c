@@ -16,7 +16,6 @@
  *          Copyright 2016-2019 Miran Grca.
  *          Copyright 2025 starfrost
  */
-#include <stdbool.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -164,11 +163,30 @@ vid_update_latch(t1kvid_t *vid)
 }
 
 static void
+recalc_overscan(t1kvid_t *vid)
+{
+    int h_scale = (vid->mode & 1) ? 8 : 16;
+    int h_total = (vid->crtc[0] + 1) * h_scale;
+    int h_disp = vid->crtc[1] * h_scale;
+    int h_sync_pos = vid->crtc[2] * h_scale;
+    int h_sync_width = (((vid->crtc[3] & 0x0F) == 0) ? 16 : (vid->crtc[3] & 0x0F)) * h_scale;
+    vid->h_front_porch = h_sync_pos - h_disp;
+    vid->h_back_porch = h_total - h_sync_pos - h_sync_width;
+    vid->h_porch_total = vid->h_front_porch + vid->h_back_porch;
+
+    int v_scale = vid->crtc[9] + 1;
+    int v_total = ((vid->crtc[4] + 1) * v_scale) + vid->crtc[5];
+    vid->v_disp = vid->crtc[6] * v_scale;
+    int v_sync_pos = vid->crtc[7] * v_scale;
+    int v_sync_width = 16;
+    int v_front_porch = v_sync_pos - vid->v_disp;
+    vid->v_back_porch = v_total - v_sync_pos - v_sync_width;
+    vid->v_porch_total = v_front_porch + vid->v_back_porch;
+}
+
+static void
 baseline_calib_start(t1kvid_t *vid)
 {
-    vid->baseline_ready = false;
-    vid->hsync_offset = 0;
-    vid->vsync_offset = 0;
     timer_on_auto(&vid->calib_timer, 100000.0);
 }
 
@@ -178,31 +196,8 @@ baseline_calib_finish(void *priv)
     tandy_t  *dev = (tandy_t *) priv;
     t1kvid_t *vid = dev->vid;
 
-    vid->baseline_hsyncpos = vid->crtc[2];
-    vid->baseline_vsyncpos = vid->crtc[7];
-    vid->baseline_ready = true;
-}
-
-static void
-vid_update_display_offset(t1kvid_t *vid, uint8_t reg)
-{
-    int hsync_scale = (vid->mode & 1) ? 8 : 16;
-    int vsync_scale = vid->crtc[9] + 1;
-
-    if (!vid->baseline_ready) {
-        vid->hsync_offset = 0;
-        vid->vsync_offset = 0;
-        return;
-    } else {
-        switch (reg) {
-            case 2:
-                vid->hsync_offset = ((int)vid->baseline_hsyncpos - (int)vid->crtc[2]) * hsync_scale;
-                break;
-            case 7:
-                vid->vsync_offset_pending = ((int)vid->baseline_vsyncpos - (int)vid->crtc[7]) * vsync_scale;
-                break;
-        }
-    }
+    vid->h_back_porch_baseline = vid->h_back_porch;
+    vid->v_back_porch_baseline = vid->v_back_porch;
 }
 
 void
@@ -231,16 +226,18 @@ tandy_vid_out(uint16_t addr, uint8_t val, void *priv)
                     vid->fullchange = changeframecount;
                     recalc_timings(dev);
                 }
-                if (vid->crtcreg == 0x01 || vid->crtcreg == 0x06)
-                    baseline_calib_start(vid);
-                if (vid->crtcreg == 0x02 || vid->crtcreg == 0x07)
-                    vid_update_display_offset(vid, vid->crtcreg);
+                if (vid->crtcreg <= 0x09)
+                    recalc_overscan(vid);
             }
             break;
 
         case 0x03d8:
             old = vid->mode;
             vid->mode = val;
+            if (old != val) {
+                baseline_calib_start(vid);
+                recalc_overscan(vid);
+            }
             if ((old ^ val) & 0x01)
                 recalc_timings(dev);
             if (!dev->is_sl2)
@@ -384,7 +381,7 @@ vid_read(uint32_t addr, void *priv)
 }
 
 static void
-vid_render(tandy_t *dev, int line, int hos_offs)
+vid_render(tandy_t *dev, int line)
 {
     t1kvid_t *vid         = dev->vid;
     uint16_t  cursoraddr  = (vid->crtc[15] | (vid->crtc[14] << 8)) & 0x3fff;
@@ -401,7 +398,7 @@ vid_render(tandy_t *dev, int line, int hos_offs)
     cols[0]       = (vid->array[2] & 0xf) + 16;
 
     if (line >= 0) {
-        for (c = 0; c < hos_offs; c++) {
+        for (c = 0; c < vid->h_back_porch; c++) {
             if (vid->array[3] & 4) {
                     buffer32->line[line][c] = cols[0];
             } else if ((vid->mode & 0x12) == 0x12) {
@@ -411,20 +408,18 @@ vid_render(tandy_t *dev, int line, int hos_offs)
             }
         }
 
-        for (c = 0; c < 8 - vid->hsync_offset; c++) {
+        for (c = 0; c < vid->h_front_porch; c++) {
             if (vid->mode & 1)
-                out_x = c + (vid->crtc[1] << 3) + hos_offs;
+                out_x = c + (vid->crtc[1] << 3) + vid->h_back_porch;
             else
-                out_x = c + (vid->crtc[1] << 4) + hos_offs;
+                out_x = c + (vid->crtc[1] << 4) + vid->h_back_porch;
 
-            if (out_x >= 0) {
-                if (vid->array[3] & 4) {
-                    buffer32->line[line][out_x] = cols[0];
-                } else if ((vid->mode & 0x12) == 0x12) {
-                    buffer32->line[line][out_x] = 0;
-                } else {
-                    buffer32->line[line][out_x] = (vid->col & 15) + 16;
-                }
+            if (vid->array[3] & 4) {
+                buffer32->line[line][out_x] = cols[0];
+            } else if ((vid->mode & 0x12) == 0x12) {
+                buffer32->line[line][out_x] = 0;
+            } else {
+                buffer32->line[line][out_x] = (vid->col & 15) + 16;
             }
         }
     }
@@ -433,7 +428,7 @@ vid_render(tandy_t *dev, int line, int hos_offs)
         for (x = 0; x < vid->crtc[1] * 2; x++) {
             dat = (vid->vram[(vid->memaddr << 1) & 0xffff] << 8) | vid->vram[((vid->memaddr << 1) + 1) & 0xffff];
             vid->memaddr++;
-            out_x = (x << 2) + hos_offs;
+            out_x = (x << 2) + vid->h_back_porch;
             if (line >= 0) {
                 if (out_x >= 0)     buffer32->line[line][out_x]     = vid->array[((dat >> 12) & 0xf) + 16] + 16;
                 if (out_x + 1 >= 0) buffer32->line[line][out_x + 1] = vid->array[((dat >> 8) & 0xf) + 16] + 16;
@@ -446,7 +441,7 @@ vid_render(tandy_t *dev, int line, int hos_offs)
             dat = (vid->vram[((vid->memaddr << 1) & 0x1fff) + ((vid->scanline & 3) * 0x2000)] << 8) |
                   vid->vram[((vid->memaddr << 1) & 0x1fff) + ((vid->scanline & 3) * 0x2000) + 1];
             vid->memaddr++;
-            out_x = (x << 3) + hos_offs;
+            out_x = (x << 3) + vid->h_back_porch;
             if (line >= 0) {
                 if (out_x >= 0)     buffer32->line[line][out_x] = buffer32->line[line][out_x + 1] =
                     vid->array[((dat >> 12) & vid->array[1] & 0x0f) + 16] + 16;
@@ -467,7 +462,7 @@ vid_render(tandy_t *dev, int line, int hos_offs)
                 dat = (vid->vram[((vid->memaddr << 1) & 0x1fff) + ((vid->scanline & 3) * 0x2000)] << 8) |
                       vid->vram[((vid->memaddr << 1) & 0x1fff) + ((vid->scanline & 3) * 0x2000) + 1];
             vid->memaddr++;
-            out_x = (x << 4) + hos_offs;
+            out_x = (x << 4) + vid->h_back_porch;
             if (line >= 0) {
                 if (out_x >= 0)      buffer32->line[line][out_x] = buffer32->line[line][out_x + 1] =
                 buffer32->line[line][out_x + 2] = buffer32->line[line][out_x + 3] =
@@ -491,7 +486,7 @@ vid_render(tandy_t *dev, int line, int hos_offs)
             for (c = 0; c < 8; c++) {
                 chr = (dat >> 6) & 2;
                 chr |= ((dat >> 15) & 1);
-                out_x = (x << 3) + hos_offs + c;
+                out_x = (x << 3) + vid->h_back_porch + c;
                 if (out_x >= 0 && line >= 0)
                     buffer32->line[line][out_x] =
                         vid->array[(chr & vid->array[1]) + 16] + 16;
@@ -514,12 +509,12 @@ vid_render(tandy_t *dev, int line, int hos_offs)
             }
             if (line >= 0) {
                 if (vid->scanline & 8)  for (c = 0; c < 8; c++) {
-                    out_x = (x << 3) + c + hos_offs;
+                    out_x = (x << 3) + c + vid->h_back_porch;
                     if (out_x >= 0)
                         buffer32->line[line][out_x] =
                             ((chr >= 0xb3) && (chr <= 0xdf)) ? cols[(fontdat[chr][7] & (1 << (c ^ 7))) ? 1 : 0] : cols[0];
                 } else  for (c = 0; c < 8; c++) {
-                    out_x = (x << 3) + c + hos_offs;
+                    out_x = (x << 3) + c + vid->h_back_porch;
                     if (out_x >= 0) {
                         if (vid->scanline == 8)
                             buffer32->line[line][out_x] = cols[(fontdat[chr][7] & (1 << (c ^ 7))) ? 1 : 0];
@@ -528,7 +523,7 @@ vid_render(tandy_t *dev, int line, int hos_offs)
                     }
                 }
                 if (drawcursor)  for (c = 0; c < 8; c++) {
-                    out_x = (x << 3) + c + hos_offs;
+                    out_x = (x << 3) + c + vid->h_back_porch;
                     if (out_x >= 0)
                         buffer32->line[line][out_x] ^= 15;
                 }
@@ -552,12 +547,12 @@ vid_render(tandy_t *dev, int line, int hos_offs)
             vid->memaddr++;
             if (line >= 0) {
                 if (vid->scanline & 8)  for (c = 0; c < 8; c++) {
-                    out_x = (x << 4) + (c << 1) + hos_offs;
+                    out_x = (x << 4) + (c << 1) + vid->h_back_porch;
                     if (out_x >= 0)     buffer32->line[line][out_x] =
                         buffer32->line[line][out_x + 1] =
                         ((chr >= 0xb3) && (chr <= 0xdf)) ? cols[(fontdat[chr][7] & (1 << (c ^ 7))) ? 1 : 0] : cols[0];
                 } else  for (c = 0; c < 8; c++) {
-                    out_x = (x << 4) + (c << 1) + hos_offs;
+                    out_x = (x << 4) + (c << 1) + vid->h_back_porch;
                     if (vid->scanline == 8) {
                         if (out_x >= 0)     buffer32->line[line][out_x] =
                             buffer32->line[line][out_x + 1] =
@@ -569,7 +564,7 @@ vid_render(tandy_t *dev, int line, int hos_offs)
                     }
                 }
                 if (drawcursor)  for (c = 0; c < 16; c++) {
-                    out_x = (x << 4) + c + hos_offs;
+                    out_x = (x << 4) + c + vid->h_back_porch;
                     if (out_x >= 0)
                         buffer32->line[line][out_x] ^= 15;
                 }
@@ -600,7 +595,7 @@ vid_render(tandy_t *dev, int line, int hos_offs)
                   vid->vram[((vid->memaddr << 1) & 0x1fff) + ((vid->scanline & 1) * 0x2000) + 1];
             vid->memaddr++;
             for (c = 0; c < 8; c++) {
-                out_x = (x << 4) + (c << 1) + hos_offs;
+                out_x = (x << 4) + (c << 1) + vid->h_back_porch;
                 if (out_x >= 0 && line >= 0)     buffer32->line[line][out_x] =
                 buffer32->line[line][out_x + 1] = cols[dat >> 14];
                 dat <<= 2;
@@ -614,7 +609,7 @@ vid_render(tandy_t *dev, int line, int hos_offs)
                   vid->vram[((vid->memaddr << 1) & 0x1fff) + ((vid->scanline & 1) * 0x2000) + 1];
             vid->memaddr++;
             for (c = 0; c < 16; c++) {
-                out_x = (x << 4) + c + hos_offs;
+                out_x = (x << 4) + c + vid->h_back_porch;
                 if (out_x >= 0 && line >= 0)
                     buffer32->line[line][out_x] = buffer32->line[(line) + 1][out_x] = cols[dat >> 15];
                 dat <<= 1;
@@ -631,16 +626,16 @@ vid_render_blank(tandy_t *dev, int line)
     if (line >= 0) {
         if (vid->array[3] & 4) {
             if (vid->mode & 1)
-                hline(buffer32, 0, line, (vid->crtc[1] << 3) + 16, (vid->array[2] & 0xf) + 16);
+                hline(buffer32, 0, line, (vid->crtc[1] << 3) + vid->h_porch_total, (vid->array[2] & 0xf) + 16);
             else
-                hline(buffer32, 0, line, (vid->crtc[1] << 4) + 16, (vid->array[2] & 0xf) + 16);
+                hline(buffer32, 0, line, (vid->crtc[1] << 4) + vid->h_porch_total, (vid->array[2] & 0xf) + 16);
         } else {
             int cols = ((vid->mode & 0x12) == 0x12) ? 0 : (vid->col & 0xf) + 16;
 
             if (vid->mode & 1)
-                hline(buffer32, 0, line, (vid->crtc[1] << 3) + 16, cols);
+                hline(buffer32, 0, line, (vid->crtc[1] << 3) + vid->h_porch_total, cols);
             else
-                hline(buffer32, 0, line, (vid->crtc[1] << 4) + 16, cols);
+                hline(buffer32, 0, line, (vid->crtc[1] << 4) + vid->h_porch_total, cols);
         }
     }
 }
@@ -652,9 +647,9 @@ vid_render_process(tandy_t *dev, int line)
     int       x;
 
     if (vid->mode & 1)
-        x = (vid->crtc[1] << 3) + 16;
+        x = (vid->crtc[1] << 3) + vid->h_porch_total;
     else
-        x = (vid->crtc[1] << 4) + 16;
+        x = (vid->crtc[1] << 4) + vid->h_porch_total;
 
     if (line >= 0) {
         if (!dev->is_sl2 && vid->composite)
@@ -675,9 +670,6 @@ vid_poll(void *priv)
     int       oldvc;
     int       scanline_old;
     int       old_ma;
-    int       hos_offs              = 8 + vid->hsync_offset;
-    int       displine_offs         = vid->displine + vid->vsync_offset;
-    int       displine_offs_double  = (vid->displine << 1) + (vid->vsync_offset << 1);
 
     if (!vid->linepos) {
         timer_advance_u64(&vid->timer, vid->dispofftime);
@@ -694,39 +686,39 @@ vid_poll(void *priv)
             vid->lastline = vid->displine;
             switch (vid->double_type) {
                 default:
-                    vid_render(dev, displine_offs_double, hos_offs);
-                    vid_render_blank(dev, displine_offs_double + 1);
+                    vid_render(dev, vid->displine << 1);
+                    vid_render_blank(dev, (vid->displine << 1) + 1);
                     break;
                 case DOUBLE_NONE:
-                    vid_render(dev, displine_offs, hos_offs);
+                    vid_render(dev, vid->displine);
                     break;
                 case DOUBLE_SIMPLE:
                     old_ma = vid->memaddr;
-                    vid_render(dev, displine_offs_double, hos_offs);
+                    vid_render(dev, vid->displine << 1);
                     vid->memaddr = old_ma;
-                    vid_render(dev, displine_offs_double + 1, hos_offs);
+                    vid_render(dev, (vid->displine << 1) + 1);
                     break;
             }
         } else  switch (vid->double_type) {
             default:
-                vid_render_blank(dev, displine_offs_double);
+                vid_render_blank(dev, vid->displine << 1);
                 break;
             case DOUBLE_NONE:
-                vid_render_blank(dev, displine_offs);
+                vid_render_blank(dev, vid->displine);
                 break;
             case DOUBLE_SIMPLE:
-                vid_render_blank(dev, displine_offs_double);
-                vid_render_blank(dev, displine_offs_double + 1);
+                vid_render_blank(dev, vid->displine << 1);
+                vid_render_blank(dev, (vid->displine << 1) + 1);
                 break;
         }
 
         switch (vid->double_type) {
             default:
-                vid_render_process(dev, displine_offs_double);
-                vid_render_process(dev, displine_offs_double + 1);
+                vid_render_process(dev, vid->displine << 1);
+                vid_render_process(dev, (vid->displine << 1) + 1);
                 break;
             case DOUBLE_NONE:
-                vid_render_process(dev, displine_offs);
+                vid_render_process(dev, vid->displine);
                 break;
         }
 
@@ -743,8 +735,10 @@ vid_poll(void *priv)
         vid->linepos = 0;
         if (vid->vsynctime) {
             vid->vsynctime--;
-            if (!vid->vsynctime)
+            if (!vid->vsynctime) {
                 vid->status &= ~8;
+                vid->displine = 0;
+            }
         }
         if (vid->scanline == (vid->crtc[11] & 31) || ((vid->crtc[8] & 3) == 3 && vid->scanline == ((vid->crtc[11] & 31) >> 1))) {
             vid->cursorvisible  = 0;
@@ -790,20 +784,18 @@ vid_poll(void *priv)
                     vid->cursoron = vid->blink & 16;
             }
             if (vid->vc == vid->crtc[7]) {
-                vid->vsync_offset = vid->vsync_offset_pending;
                 vid->dispon    = 0;
-                vid->displine  = 0;
                 vid->vsynctime = 16;
                 picint(1 << 5);
                 if (vid->crtc[7]) {
                     if (vid->mode & 1)
-                        x = (vid->crtc[1] << 3) + 16;
+                        x = (vid->crtc[1] << 3) + vid->h_porch_total;
                     else
-                        x = (vid->crtc[1] << 4) + 16;
+                        x = (vid->crtc[1] << 4) + vid->h_porch_total;
                     vid->lastline++;
 
                     xs_temp = x;
-                    ys_temp = (vid->lastline - vid->firstline) << 1;
+                    ys_temp = vid->v_disp << 1;
 
                     if ((xs_temp > 0) && (ys_temp > 0)) {
                         if (xs_temp < 64)
@@ -811,18 +803,34 @@ vid_poll(void *priv)
                         if (ys_temp < 32)
                             ys_temp = 400;
                         if (!enable_overscan)
-                            xs_temp -= 16;
+                            xs_temp -= vid->h_porch_total;
 
                         if ((xs_temp != xsize) || (ys_temp != ysize) || video_force_resize_get()) {
                             xsize = xs_temp;
                             ysize = ys_temp;
-                            set_screen_size(xsize, ysize + (enable_overscan ? 16 : 0));
+                            set_screen_size(xsize, ysize + (enable_overscan ? (vid->v_porch_total << 1) : 0));
 
                             if (video_force_resize_get())
                                 video_force_resize_set(0);
                         }
 
-                        cga_do_blit(xsize, vid->firstline, vid->lastline, vid->double_type);
+                        if (vid->double_type > DOUBLE_NONE) {
+                            if (enable_overscan)
+                                cga_blit_memtoscreen(0, 0,
+                                                     xsize, (vid->v_disp + vid->v_porch_total) << 1,
+                                                     vid->double_type);
+                            else
+                                cga_blit_memtoscreen(vid->h_back_porch_baseline, vid->v_back_porch_baseline << 1,
+                                                     xsize, vid->v_disp << 1,
+                                                     vid->double_type);
+                        } else {
+                            if (enable_overscan)
+                                video_blit_memtoscreen(0, 0,
+                                                       xsize, vid->v_disp + vid->v_porch_total);
+                            else
+                                video_blit_memtoscreen(vid->h_back_porch_baseline, vid->v_back_porch_baseline,
+                                                       xsize, vid->v_disp);
+                        }
                     }
 
                     frames++;
@@ -892,12 +900,14 @@ tandy_vid_init(tandy_t *dev)
     t1kvid_t *vid;
 
     vid = calloc(1, sizeof(t1kvid_t));
-    vid->baseline_hsyncpos = 0;
-    vid->baseline_vsyncpos = 0;
-    vid->baseline_ready = false;
-    vid->hsync_offset = 0;
-    vid->vsync_offset = 0;
-    vid->vsync_offset_pending = 0;
+    vid->h_front_porch = 0;
+    vid->h_back_porch = 0;
+    vid->h_porch_total = 0;
+    vid->v_disp = 0;
+    vid->v_back_porch = 0;
+    vid->v_porch_total = 0;
+    vid->h_back_porch_baseline = 0;
+    vid->v_back_porch_baseline = 0;
     vid->memctrl = -1;
 
     video_inform(VIDEO_FLAG_TYPE_CGA, &timing_dram);
@@ -910,7 +920,8 @@ tandy_vid_init(tandy_t *dev)
     if (dev->is_sl2) {
         vid->b8000_limit = 0x8000;
         vid->planar_ctrl = 4;
-        overscan_x = overscan_y = 16;
+        overscan_x = vid->h_porch_total;
+        overscan_y = vid->v_porch_total << 1;
 
         io_sethandler(0x0065, 1, tandy_vid_in, NULL, NULL, tandy_vid_out, NULL, NULL, dev);
     } else
