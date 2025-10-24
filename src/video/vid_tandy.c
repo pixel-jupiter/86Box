@@ -165,22 +165,22 @@ vid_update_latch(t1kvid_t *vid)
 static void
 recalc_overscan(t1kvid_t *vid)
 {
-    int h_scale = (vid->mode & 1) ? 8 : 16;
-    int h_total = (vid->crtc[0] + 1) * h_scale;
-    int h_disp = vid->crtc[1] * h_scale;
-    int h_sync_pos = vid->crtc[2] * h_scale;
-    int h_sync_width = (((vid->crtc[3] & 0x0F) == 0) ? 16 : (vid->crtc[3] & 0x0F)) * h_scale;
+    int h_scale        = (vid->mode & 1) ? 8 : 16;
+    int h_total        = (vid->crtc[0] + 1) * h_scale;
+    int h_disp         = vid->crtc[1] * h_scale;
+    int h_sync_pos     = vid->crtc[2] * h_scale;
+    int h_sync_width   = (((vid->crtc[3] & 0x0F) == 0) ? 16 : (vid->crtc[3] & 0x0F)) * h_scale;
     vid->h_front_porch = h_sync_pos - h_disp;
-    vid->h_back_porch = h_total - h_sync_pos - h_sync_width;
+    vid->h_back_porch  = h_total - h_sync_pos - h_sync_width;
     vid->h_porch_total = vid->h_front_porch + vid->h_back_porch;
 
-    int v_scale = vid->crtc[9] + 1;
-    int v_total = ((vid->crtc[4] + 1) * v_scale) + vid->crtc[5];
-    vid->v_disp = vid->crtc[6] * v_scale;
-    int v_sync_pos = vid->crtc[7] * v_scale;
-    int v_sync_width = 16;
-    int v_front_porch = v_sync_pos - vid->v_disp;
-    vid->v_back_porch = v_total - v_sync_pos - v_sync_width;
+    int v_scale        = vid->crtc[9] + 1;
+    int v_total        = ((vid->crtc[4] + 1) * v_scale) + vid->crtc[5];
+    vid->v_disp        = vid->crtc[6] * v_scale;
+    int v_sync_pos     = vid->crtc[7] * v_scale;
+    int v_sync_width   = 16;
+    int v_front_porch  = v_sync_pos - vid->v_disp;
+    vid->v_back_porch  = v_total - v_sync_pos - v_sync_width;
     vid->v_porch_total = v_front_porch + vid->v_back_porch;
 }
 
@@ -393,35 +393,51 @@ vid_render(tandy_t *dev, int line)
     uint16_t  dat;
     int       col;
     int       cols[4];
+    uint32_t  border_val;
     int       out_x;
+    int       c_start;
 
     cols[0]       = (vid->array[2] & 0xf) + 16;
 
-    if (line >= 0) {
+    if (line < 0) {
+        if (dev->is_sl2 && (vid->array[5] & 1)) {
+            vid->memaddr += vid->crtc[1] * 2;
+        } else {
+            vid->memaddr += vid->crtc[1];
+        }
+        return;
+    }
+
+    if (vid->array[3] & 4) {
+        border_val = cols[0];
+    } else if ((vid->mode & 0x12) == 0x12) {
+        border_val = 0;
+    } else {
+        border_val = (vid->col & 15) + 16;
+    }
+
+    if (vid->array[3] & 4) {
         for (c = 0; c < vid->h_back_porch; c++) {
-            if (vid->array[3] & 4) {
-                    buffer32->line[line][c] = cols[0];
-            } else if ((vid->mode & 0x12) == 0x12) {
-                    buffer32->line[line][c] = 0;
-            } else {
-                    buffer32->line[line][c] = buffer32->line[(line) + 1][c] = (vid->col & 15) + 16;
-            }
+            buffer32->line[line][c] = border_val;
         }
-
-        for (c = 0; c < vid->h_front_porch; c++) {
-            if (vid->mode & 1)
-                out_x = c + (vid->crtc[1] << 3) + vid->h_back_porch;
-            else
-                out_x = c + (vid->crtc[1] << 4) + vid->h_back_porch;
-
-            if (vid->array[3] & 4) {
-                buffer32->line[line][out_x] = cols[0];
-            } else if ((vid->mode & 0x12) == 0x12) {
-                buffer32->line[line][out_x] = 0;
-            } else {
-                buffer32->line[line][out_x] = (vid->col & 15) + 16;
-            }
+    } else if ((vid->mode & 0x12) == 0x12) {
+        for (c = 0; c < vid->h_back_porch; c++) {
+            buffer32->line[line][c] = border_val;
         }
+    } else {
+        for (c = 0; c < vid->h_back_porch; c++) {
+            buffer32->line[line][c] = buffer32->line[(line) + 1][c] = border_val;
+        }
+    }
+
+    if (vid->mode & 1) {
+        out_x = (vid->crtc[1] << 3) + vid->h_back_porch;
+    } else {
+        out_x = (vid->crtc[1] << 4) + vid->h_back_porch;
+    }
+    c_start = out_x < 0 ? -out_x : 0;
+    for (c = c_start; c < vid->h_front_porch; c++) {
+        buffer32->line[line][out_x + c] = border_val;
     }
 
     if (dev->is_sl2 && (vid->array[5] & 1)) { /*640x200x16*/
@@ -429,11 +445,16 @@ vid_render(tandy_t *dev, int line)
             dat = (vid->vram[(vid->memaddr << 1) & 0xffff] << 8) | vid->vram[((vid->memaddr << 1) + 1) & 0xffff];
             vid->memaddr++;
             out_x = (x << 2) + vid->h_back_porch;
-            if (line >= 0) {
-                if (out_x >= 0)     buffer32->line[line][out_x]     = vid->array[((dat >> 12) & 0xf) + 16] + 16;
-                if (out_x + 1 >= 0) buffer32->line[line][out_x + 1] = vid->array[((dat >> 8) & 0xf) + 16] + 16;
-                if (out_x + 2 >= 0) buffer32->line[line][out_x + 2] = vid->array[((dat >> 4) & 0xf) + 16] + 16;
-                if (out_x + 3 >= 0) buffer32->line[line][out_x + 3] = vid->array[(dat & 0xf) + 16] + 16;
+            if (out_x >= 0) {
+                buffer32->line[line][out_x]     = vid->array[((dat >> 12) & 0xf) + 16] + 16;
+                buffer32->line[line][out_x + 1] = vid->array[((dat >> 8) & 0xf) + 16] + 16;
+                buffer32->line[line][out_x + 2] = vid->array[((dat >> 4) & 0xf) + 16] + 16;
+                buffer32->line[line][out_x + 3] = vid->array[(dat & 0xf) + 16] + 16;
+            } else if (out_x > -4) {
+                for (c = -out_x; c < 4; c++) {
+                    buffer32->line[line][out_x + c] =
+                        vid->array[((dat >> (12 - c * 4)) & 0xf) + 16] + 16;
+                }
             }
         }
     } else if ((vid->array[3] & 0x10) && (vid->mode & 1)) { /*320x200x16*/
@@ -442,15 +463,20 @@ vid_render(tandy_t *dev, int line)
                   vid->vram[((vid->memaddr << 1) & 0x1fff) + ((vid->scanline & 3) * 0x2000) + 1];
             vid->memaddr++;
             out_x = (x << 3) + vid->h_back_porch;
-            if (line >= 0) {
-                if (out_x >= 0)     buffer32->line[line][out_x] = buffer32->line[line][out_x + 1] =
+            if (out_x >= 0) {
+                buffer32->line[line][out_x]     = buffer32->line[line][out_x + 1] =
                     vid->array[((dat >> 12) & vid->array[1] & 0x0f) + 16] + 16;
-                if (out_x + 2 >= 0) buffer32->line[line][out_x + 2] = buffer32->line[line][out_x + 3] =
+                buffer32->line[line][out_x + 2] = buffer32->line[line][out_x + 3] =
                     vid->array[((dat >> 8) & vid->array[1] & 0x0f) + 16] + 16;
-                if (out_x + 4 >= 0) buffer32->line[line][out_x + 4] = buffer32->line[line][out_x + 5] =
+                buffer32->line[line][out_x + 4] = buffer32->line[line][out_x + 5] =
                     vid->array[((dat >> 4) & vid->array[1] & 0x0f) + 16] + 16;
-                if (out_x + 6 >= 0) buffer32->line[line][out_x + 6] = buffer32->line[line][out_x + 7] =
+                buffer32->line[line][out_x + 6] = buffer32->line[line][out_x + 7] =
                     vid->array[(dat & vid->array[1] & 0x0f) + 16] + 16;
+            } else if (out_x > -8) {
+                for (c = -out_x; c < 8; c++) {
+                    buffer32->line[line][out_x + c] =
+                        vid->array[((dat >> 12 - (c >> 1) * 4) & vid->array[1] & 0x0f) + 16] + 16;
+                }
             }
         }
     } else if (vid->array[3] & 0x10) { /*160x200x16*/
@@ -463,19 +489,24 @@ vid_render(tandy_t *dev, int line)
                       vid->vram[((vid->memaddr << 1) & 0x1fff) + ((vid->scanline & 3) * 0x2000) + 1];
             vid->memaddr++;
             out_x = (x << 4) + vid->h_back_porch;
-            if (line >= 0) {
-                if (out_x >= 0)      buffer32->line[line][out_x] = buffer32->line[line][out_x + 1] =
-                buffer32->line[line][out_x + 2] = buffer32->line[line][out_x + 3] =
+            if (out_x >= 0) {
+                buffer32->line[line][out_x]      = buffer32->line[line][out_x + 1]  =
+                buffer32->line[line][out_x + 2]  = buffer32->line[line][out_x + 3]  =
                     vid->array[((dat >> 12) & vid->array[1] & 0x0f) + 16] + 16;
-                if (out_x + 4 >= 0)  buffer32->line[line][out_x + 4] = buffer32->line[line][out_x + 5] =
-                buffer32->line[line][out_x + 6] = buffer32->line[line][out_x + 7] =
+                buffer32->line[line][out_x + 4]  = buffer32->line[line][out_x + 5]  =
+                buffer32->line[line][out_x + 6]  = buffer32->line[line][out_x + 7]  =
                     vid->array[((dat >> 8) & vid->array[1] & 0x0f) + 16] + 16;
-                if (out_x + 8 >= 0)  buffer32->line[line][out_x + 8] = buffer32->line[line][out_x + 9] =
+                buffer32->line[line][out_x + 8]  = buffer32->line[line][out_x + 9]  =
                 buffer32->line[line][out_x + 10] = buffer32->line[line][out_x + 11] =
                     vid->array[((dat >> 4) & vid->array[1] & 0x0f) + 16] + 16;
-                if (out_x + 12 >= 0) buffer32->line[line][out_x + 12] = buffer32->line[line][out_x + 13] =
+                buffer32->line[line][out_x + 12] = buffer32->line[line][out_x + 13] =
                 buffer32->line[line][out_x + 14] = buffer32->line[line][out_x + 15] =
                     vid->array[(dat & vid->array[1] & 0x0f) + 16] + 16;
+            } else if (out_x > -16) {
+                for (c = -out_x; c < 16; c++) {
+                    buffer32->line[line][out_x + c] =
+                        vid->array[((dat >> 12 - (c >> 2) * 4) & vid->array[1] & 0x0f) + 16] + 16;
+                }
             }
         }
     } else if (vid->array[3] & 0x08) { /*640x200x4 - this implementation is a complete guess!*/
@@ -483,14 +514,17 @@ vid_render(tandy_t *dev, int line)
             dat = (vid->vram[((vid->memaddr << 1) & 0x1fff) + ((vid->scanline & 3) * 0x2000)] << 8) |
                   vid->vram[((vid->memaddr << 1) & 0x1fff) + ((vid->scanline & 3) * 0x2000) + 1];
             vid->memaddr++;
-            for (c = 0; c < 8; c++) {
-                chr = (dat >> 6) & 2;
-                chr |= ((dat >> 15) & 1);
-                out_x = (x << 3) + vid->h_back_porch + c;
-                if (out_x >= 0 && line >= 0)
-                    buffer32->line[line][out_x] =
+            out_x = (x << 3) + vid->h_back_porch;
+            if (out_x > -8) {
+                c_start = out_x < 0 ? -out_x : 0;
+                dat <<= c_start;
+                for (c = c_start; c < 8; c++) {
+                    chr = (dat >> 6) & 2;
+                    chr |= ((dat >> 15) & 1);
+                    buffer32->line[line][out_x + c] =
                         vid->array[(chr & vid->array[1]) + 16] + 16;
-                dat <<= 1;
+                    dat <<= 1;
+                }
             }
         }
     } else if (vid->mode & 1) {
@@ -507,25 +541,20 @@ vid_render(tandy_t *dev, int line)
                 cols[1] = vid->array[((attr & 15) & vid->array[1]) + 16] + 16;
                 cols[0] = vid->array[((attr >> 4) & vid->array[1]) + 16] + 16;
             }
-            if (line >= 0) {
-                if (vid->scanline & 8)  for (c = 0; c < 8; c++) {
-                    out_x = (x << 3) + c + vid->h_back_porch;
-                    if (out_x >= 0)
-                        buffer32->line[line][out_x] =
-                            ((chr >= 0xb3) && (chr <= 0xdf)) ? cols[(fontdat[chr][7] & (1 << (c ^ 7))) ? 1 : 0] : cols[0];
-                } else  for (c = 0; c < 8; c++) {
-                    out_x = (x << 3) + c + vid->h_back_porch;
-                    if (out_x >= 0) {
-                        if (vid->scanline == 8)
-                            buffer32->line[line][out_x] = cols[(fontdat[chr][7] & (1 << (c ^ 7))) ? 1 : 0];
-                        else
-                            buffer32->line[line][out_x] = cols[(fontdat[chr][vid->scanline & 7] & (1 << (c ^ 7))) ? 1 : 0];
-                    }
+            out_x = (x << 3) + vid->h_back_porch;
+            if (out_x > -8) {
+                c_start = out_x < 0 ? -out_x : 0;
+                if (vid->scanline & 8)  for (c = c_start; c < 8; c++) {
+                    buffer32->line[line][out_x + c] =
+                        ((chr >= 0xb3) && (chr <= 0xdf)) ? cols[(fontdat[chr][7] & (1 << (c ^ 7))) ? 1 : 0] : cols[0];
+                } else  for (c = c_start; c < 8; c++) {
+                    if (vid->scanline == 8)
+                        buffer32->line[line][out_x + c] = cols[(fontdat[chr][7] & (1 << (c ^ 7))) ? 1 : 0];
+                    else
+                        buffer32->line[line][out_x + c] = cols[(fontdat[chr][vid->scanline & 7] & (1 << (c ^ 7))) ? 1 : 0];
                 }
-                if (drawcursor)  for (c = 0; c < 8; c++) {
-                    out_x = (x << 3) + c + vid->h_back_porch;
-                    if (out_x >= 0)
-                        buffer32->line[line][out_x] ^= 15;
+                if (drawcursor)  for (c = c_start; c < 8; c++) {
+                    buffer32->line[line][out_x + c] ^= 15;
                 }
             }
             vid->memaddr++;
@@ -545,28 +574,29 @@ vid_render(tandy_t *dev, int line)
                 cols[0] = vid->array[((attr >> 4) & vid->array[1]) + 16] + 16;
             }
             vid->memaddr++;
-            if (line >= 0) {
-                if (vid->scanline & 8)  for (c = 0; c < 8; c++) {
-                    out_x = (x << 4) + (c << 1) + vid->h_back_porch;
-                    if (out_x >= 0)     buffer32->line[line][out_x] =
-                        buffer32->line[line][out_x + 1] =
+            out_x = (x << 4) + vid->h_back_porch;
+            if (out_x > -16) {
+                c_start = out_x < 0 ? (-out_x >> 1) : 0;
+                if (vid->scanline & 8)  for (c = c_start; c < 8; c++) {
+                    buffer32->line[line][out_x + (c << 1)] =
+                    buffer32->line[line][out_x + 1 + (c << 1)] =
                         ((chr >= 0xb3) && (chr <= 0xdf)) ? cols[(fontdat[chr][7] & (1 << (c ^ 7))) ? 1 : 0] : cols[0];
-                } else  for (c = 0; c < 8; c++) {
-                    out_x = (x << 4) + (c << 1) + vid->h_back_porch;
+                } else  for (c = c_start; c < 8; c++) {
                     if (vid->scanline == 8) {
-                        if (out_x >= 0)     buffer32->line[line][out_x] =
-                            buffer32->line[line][out_x + 1] =
+                        buffer32->line[line][out_x + (c << 1)] =
+                        buffer32->line[line][out_x + 1 + (c << 1)] =
                             cols[(fontdat[chr][7] & (1 << (c ^ 7))) ? 1 : 0];
                     } else {
-                        if (out_x >= 0)     buffer32->line[line][out_x] =
-                            buffer32->line[line][out_x + 1] =
+                        buffer32->line[line][out_x + (c << 1)] =
+                        buffer32->line[line][out_x + 1 + (c << 1)] =
                             cols[(fontdat[chr][vid->scanline & 7] & (1 << (c ^ 7))) ? 1 : 0];
                     }
                 }
-                if (drawcursor)  for (c = 0; c < 16; c++) {
-                    out_x = (x << 4) + c + vid->h_back_porch;
-                    if (out_x >= 0)
-                        buffer32->line[line][out_x] ^= 15;
+                if (drawcursor) {
+                    c_start = out_x < 0 ? -out_x : 0;
+                    for (c = c_start; c < 16; c++) {
+                        buffer32->line[line][out_x + c] ^= 15;
+                    }
                 }
             }
         }
@@ -594,11 +624,15 @@ vid_render(tandy_t *dev, int line)
             dat = (vid->vram[((vid->memaddr << 1) & 0x1fff) + ((vid->scanline & 1) * 0x2000)] << 8) |
                   vid->vram[((vid->memaddr << 1) & 0x1fff) + ((vid->scanline & 1) * 0x2000) + 1];
             vid->memaddr++;
-            for (c = 0; c < 8; c++) {
-                out_x = (x << 4) + (c << 1) + vid->h_back_porch;
-                if (out_x >= 0 && line >= 0)     buffer32->line[line][out_x] =
-                buffer32->line[line][out_x + 1] = cols[dat >> 14];
-                dat <<= 2;
+            out_x = (x << 4) + vid->h_back_porch;
+            if (out_x > -16) {
+                c_start = out_x < 0 ? -out_x >> 1 : 0;
+                dat <<= (c_start > 0 ? c_start << 1 : 0);
+                for (c = c_start; c < 8; c++) {
+                    buffer32->line[line][out_x + (c << 1)] =
+                    buffer32->line[line][out_x + 1 + (c << 1)] = cols[dat >> 14];
+                    dat <<= 2;
+                }
             }
         }
     } else {
@@ -608,11 +642,14 @@ vid_render(tandy_t *dev, int line)
             dat = (vid->vram[((vid->memaddr << 1) & 0x1fff) + ((vid->scanline & 1) * 0x2000)] << 8) |
                   vid->vram[((vid->memaddr << 1) & 0x1fff) + ((vid->scanline & 1) * 0x2000) + 1];
             vid->memaddr++;
-            for (c = 0; c < 16; c++) {
-                out_x = (x << 4) + c + vid->h_back_porch;
-                if (out_x >= 0 && line >= 0)
-                    buffer32->line[line][out_x] = buffer32->line[(line) + 1][out_x] = cols[dat >> 15];
-                dat <<= 1;
+            out_x = (x << 4) + vid->h_back_porch;
+            if (out_x > -16) {
+                c_start = out_x < 0 ? -out_x : 0;
+                dat <<= (c_start > 0 ? c_start : 0);
+                for (c = c_start; c < 16; c++) {
+                    buffer32->line[line][out_x + c] = buffer32->line[(line) + 1][out_x + c] = cols[dat >> 15];
+                    dat <<= 1;
+                }
             }
         }
     }
@@ -623,20 +660,21 @@ vid_render_blank(tandy_t *dev, int line)
 {
     t1kvid_t *vid         = dev->vid;
 
-    if (line >= 0) {
-        if (vid->array[3] & 4) {
-            if (vid->mode & 1)
-                hline(buffer32, 0, line, (vid->crtc[1] << 3) + vid->h_porch_total, (vid->array[2] & 0xf) + 16);
-            else
-                hline(buffer32, 0, line, (vid->crtc[1] << 4) + vid->h_porch_total, (vid->array[2] & 0xf) + 16);
-        } else {
-            int cols = ((vid->mode & 0x12) == 0x12) ? 0 : (vid->col & 0xf) + 16;
+    if (line < 0)
+        return;
 
-            if (vid->mode & 1)
-                hline(buffer32, 0, line, (vid->crtc[1] << 3) + vid->h_porch_total, cols);
-            else
-                hline(buffer32, 0, line, (vid->crtc[1] << 4) + vid->h_porch_total, cols);
-        }
+    if (vid->array[3] & 4) {
+        if (vid->mode & 1)
+            hline(buffer32, 0, line, (vid->crtc[1] << 3) + vid->h_porch_total, (vid->array[2] & 0xf) + 16);
+        else
+            hline(buffer32, 0, line, (vid->crtc[1] << 4) + vid->h_porch_total, (vid->array[2] & 0xf) + 16);
+    } else {
+        int cols = ((vid->mode & 0x12) == 0x12) ? 0 : (vid->col & 0xf) + 16;
+
+        if (vid->mode & 1)
+            hline(buffer32, 0, line, (vid->crtc[1] << 3) + vid->h_porch_total, cols);
+        else
+            hline(buffer32, 0, line, (vid->crtc[1] << 4) + vid->h_porch_total, cols);
     }
 }
 
@@ -646,17 +684,18 @@ vid_render_process(tandy_t *dev, int line)
     t1kvid_t *vid         = dev->vid;
     int       x;
 
+    if (line < 0)
+        return;
+
     if (vid->mode & 1)
         x = (vid->crtc[1] << 3) + vid->h_porch_total;
     else
         x = (vid->crtc[1] << 4) + vid->h_porch_total;
 
-    if (line >= 0) {
-        if (!dev->is_sl2 && vid->composite)
-            Composite_Process(vid->mode, 0, x >> 2, buffer32->line[line]);
-        else
-            video_process_8(x, line);
-    }
+    if (!dev->is_sl2 && vid->composite)
+        Composite_Process(vid->mode, 0, x >> 2, buffer32->line[line]);
+    else
+        video_process_8(x, line);
 }
 
 static void
