@@ -24,6 +24,7 @@
 #include <wchar.h>
 #include <math.h>
 #define HAVE_STDARG_H
+#define V_ACTIVE 246 // Active scanlines, 262 (NTSC Total) - 16 (V Sync)
 #include <86box/86box.h>
 #include <86box/timer.h>
 #include <86box/io.h>
@@ -834,7 +835,7 @@ vid_poll(void *priv)
                     vid->lastline++;
 
                     xs_temp = x;
-                    ys_temp = vid->v_disp << 1;
+                    ys_temp = V_ACTIVE << 1;
 
                     if ((xs_temp > 0) && (ys_temp > 0)) {
                         if (xs_temp < 64)
@@ -847,7 +848,7 @@ vid_poll(void *priv)
                         if ((xs_temp != xsize) || (ys_temp != ysize) || video_force_resize_get()) {
                             xsize = xs_temp;
                             ysize = ys_temp;
-                            set_screen_size(xsize, ysize + (enable_overscan ? (vid->v_porch_total << 1) : 0));
+                            set_screen_size(xsize, ysize - (enable_overscan ? 0 : vid->v_porch_total << 1));
 
                             if (video_force_resize_get())
                                 video_force_resize_set(0);
@@ -856,7 +857,7 @@ vid_poll(void *priv)
                         if (vid->double_type > DOUBLE_NONE) {
                             if (enable_overscan)
                                 cga_blit_memtoscreen(0, 0,
-                                                     xsize, (vid->v_disp + vid->v_porch_total) << 1,
+                                                     xsize, V_ACTIVE << 1,
                                                      vid->double_type);
                             else
                                 cga_blit_memtoscreen(vid->h_back_porch_baseline, vid->v_back_porch_baseline << 1,
@@ -865,7 +866,7 @@ vid_poll(void *priv)
                         } else {
                             if (enable_overscan)
                                 video_blit_memtoscreen(0, 0,
-                                                       xsize, vid->v_disp + vid->v_porch_total);
+                                                       xsize, V_ACTIVE);
                             else
                                 video_blit_memtoscreen(vid->h_back_porch_baseline, vid->v_back_porch_baseline,
                                                        xsize, vid->v_disp);
